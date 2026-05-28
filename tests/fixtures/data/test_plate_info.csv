@@ -1,0 +1,5 @@
+sample_id,fastq_r2,timepoint,replicate,condition
+SP01,/data/cynthia/pounce/tests/fixtures/data/test_NS_A_R2.fastq.gz,T1,A,NS
+SP02,/data/cynthia/pounce/tests/fixtures/data/test_NS_B_R2.fastq.gz,T1,B,NS
+SP03,/data/cynthia/pounce/tests/fixtures/data/test_S_A_R2.fastq.gz,T1,A,S
+SP04,/data/cynthia/pounce/tests/fixtures/data/test_S_B_R2.fastq.gz,T1,B,S
