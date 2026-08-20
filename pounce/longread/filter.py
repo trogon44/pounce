@@ -58,7 +58,7 @@ def filter_consensus(
             sequence = str(record.seq)
 
             if _passes_filter(size, sequence, mean_q, min_reads, max_n_frac, min_mean_quality):
-                out.write(f">{record.id}\n{sequence}\n")
+                out.write(f">{record.id} size={size}\n{sequence}\n")
                 n_passed += 1
 
     return n_total, n_passed

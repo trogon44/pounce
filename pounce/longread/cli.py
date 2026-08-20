@@ -20,15 +20,17 @@ def longread():
 @click.option("--mapq-min", default=0, show_default=True)
 @click.option("--adapter-flank", default=20, show_default=True)
 @click.option("--sort-buffer", default="2G", show_default=True)
+@click.option("--threads", default=4, show_default=True,
+              help="Threads for aligning an unaligned input BAM to the plasmid reference")
 def extract(bam, plasmid_fasta, wt_orf_fasta, orf_start, orf_end,
-            output, mapq_min, adapter_flank, sort_buffer):
+            output, mapq_min, adapter_flank, sort_buffer, threads):
     """Extract (barcode, orf_seq) pairs from BAM, sorted by barcode."""
     from pounce.reference import parse_reference
     from pounce.longread.extract import extract_reads_sorted
 
     ref = parse_reference(plasmid_fasta, wt_orf_fasta, orf_start, orf_end, adapter_flank)
     click.echo(f"Barcode region: {ref.barcode_start}–{ref.barcode_end} ({ref.barcode_len} bp)")
-    extract_reads_sorted(bam, ref, output, mapq_min=mapq_min, sort_buffer=sort_buffer)
+    extract_reads_sorted(bam, ref, output, mapq_min=mapq_min, sort_buffer=sort_buffer, threads=threads)
     click.echo(f"Written: {output}")
 
 
@@ -83,9 +85,11 @@ def mutations(filtered_fasta_gz, wt_orf_fasta, output):
 @click.option("--min-reads", default=3, show_default=True)
 @click.option("--max-n-frac", default=0.01, show_default=True)
 @click.option("--min-mean-quality", default=20.0, show_default=True)
+@click.option("--threads", default=4, show_default=True,
+              help="Threads for aligning an unaligned input BAM to the plasmid reference")
 @click.pass_context
 def run(ctx, bam, plasmid_fasta, wt_orf_fasta, orf_start, orf_end, out_dir,
-        mapq_min, adapter_flank, min_reads, max_n_frac, min_mean_quality):
+        mapq_min, adapter_flank, min_reads, max_n_frac, min_mean_quality, threads):
     """Run the full long-read pipeline: extract → consensus → filter → mutations."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -94,7 +98,8 @@ def run(ctx, bam, plasmid_fasta, wt_orf_fasta, orf_start, orf_end, out_dir,
                bam=bam, plasmid_fasta=plasmid_fasta, wt_orf_fasta=wt_orf_fasta,
                orf_start=orf_start, orf_end=orf_end,
                output=str(out / "reads.tsv.gz"),
-               mapq_min=mapq_min, adapter_flank=adapter_flank, sort_buffer="2G")
+               mapq_min=mapq_min, adapter_flank=adapter_flank, sort_buffer="2G",
+               threads=threads)
 
     ctx.invoke(consensus,
                reads_tsv_gz=str(out / "reads.tsv.gz"),
