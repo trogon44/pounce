@@ -37,12 +37,23 @@ def test_call_nt_mutations_multiple():
     assert any(m.endswith("T") and m[1:-1] == "10" for m in muts)
 
 
-def test_call_nt_mutations_n_ignored():
-    # 'N' in consensus should not be called as a mutation
+def test_call_nt_mutations_n_reported():
+    # A consensus 'N' (deletion in every read) must not be mistaken for wild type
     mut = list(WT)
     mut[3] = "N"
-    muts = call_nt_mutations("".join(mut), WT)
-    assert not any("4" in m for m in muts)
+    assert call_nt_mutations("".join(mut), WT) == ["A4N"]
+
+
+def test_nuc_to_aa_codon_with_n_is_dash():
+    # Codon 2 (AAA, K) with an N in it -> 'K2-'; positions are ordered numerically
+    assert nuc_to_aa_mutations(["A4N"], WT) == ["K2-"]
+    assert nuc_to_aa_mutations(["A4C", "C20T"], WT) == sorted(
+        nuc_to_aa_mutations(["A4C", "C20T"], WT), key=lambda m: int(m[1:-1])
+    )
+
+
+def test_nuc_to_aa_n_alongside_substitution_in_same_codon():
+    assert nuc_to_aa_mutations(["A4N", "A5C"], WT) == ["K2-"]
 
 
 def test_nuc_to_aa_synonymous():

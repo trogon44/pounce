@@ -49,6 +49,31 @@ def test_majority_vote_n_on_tie():
     assert qualities[0] == 0 or consensus[0] in "ACGTN"
 
 
+def test_majority_vote_gap_reads_count_as_dissent():
+    # 3 reads: two call A, one has a deletion (N). Support is 2/3, not 2/2.
+    consensus, qualities = _majority_vote(["A", "A", "N"])
+    assert consensus == "A"
+    assert qualities[0] == 5  # -10*log10(1/3) = 4.77 -> 5
+
+
+def test_majority_vote_gap_does_not_outvote_base():
+    # The consensus base is the most common A/C/G/T even when gaps are more numerous
+    consensus, _ = _majority_vote(["N", "N", "G"])
+    assert consensus == "G"
+
+
+def test_majority_vote_all_gap_is_n():
+    consensus, qualities = _majority_vote(["N", "N"])
+    assert consensus == "N"
+    assert qualities == [0]
+
+
+def test_majority_vote_tie_goes_to_first_in_acgt_order():
+    consensus, qualities = _majority_vote(["G", "A"])
+    assert consensus == "A"
+    assert qualities == [3]
+
+
 def test_call_consensus_roundtrip(tmp_path):
     """Write a tiny sorted reads TSV and check that call_consensus produces the right output."""
     reads_path = tmp_path / "reads.tsv.gz"
@@ -123,3 +148,10 @@ def test_consensus_recovers_from_pacbio_noise(tmp_path, data_dir):
 
     recovery = correct_bases / total_bases
     assert recovery >= 0.99, f"Consensus recovery {recovery:.4f} < 0.99"
+
+
+def test_call_consensus_threads_match_single_process(tmp_path, data_dir):
+    reads_path = data_dir / "test_longread_reads.tsv.gz"
+    one, many = tmp_path / "one.fastq.gz", tmp_path / "many.fastq.gz"
+    assert call_consensus(reads_path, one) == call_consensus(reads_path, many, threads=3)
+    assert gzip.open(one, "rt").read() == gzip.open(many, "rt").read()

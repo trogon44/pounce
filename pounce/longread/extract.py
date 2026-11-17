@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gzip
 import shutil
 import subprocess
 import tempfile
@@ -39,7 +38,10 @@ def _align_to_plasmid(bam_path: Path, plasmid_path: Path, work_dir: Path, thread
         f"minimap2 -t {threads} -ax map-hifi {plasmid_path} - | "
         f"samtools sort -@ {threads} -o {aligned_bam} -"
     )
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    result = subprocess.run(
+        f"set -o pipefail; {cmd}", shell=True, executable="/bin/bash",
+        capture_output=True, text=True,
+    )
     if result.returncode != 0:
         raise RuntimeError(f"Alignment to plasmid reference failed: {result.stderr}")
 
@@ -64,42 +66,83 @@ def _ensure_aligned_bam(bam_path: Path, plasmid_path: Path, work_dir: Path, thre
     return bam_path
 
 
+# CIGAR operations that consume the query / the reference (pysam codes).
+_ALIGNED = (0, 7, 8)   # M, =, X
+_INSERTION = 1
+_DELETION = 2
+_REF_SKIP = 3
+_SOFT_CLIP = 4
+
+
 def _extract_interval(
     read: pysam.AlignedSegment,
     ref_start: int,
     ref_end: int,
+    allow_partial: bool = False,
 ) -> str | None:
     """Extract read bases covering [ref_start, ref_end) in reference coordinates.
 
-    Returns None if the read does not fully span the interval.
-    Deletions relative to the reference are filled with 'N'.
+    Returns None if the read does not fully span the interval, unless
+    ``allow_partial`` is set, in which case the part of the interval outside
+    the read's alignment is filled with 'N' (None is still returned if the read
+    does not overlap the interval at all). Deletions relative to the reference
+    are filled with 'N'; insertions are dropped. Walks the CIGAR instead of
+    building per-base aligned pairs, which is much faster for the multi-kb
+    HiFi reads this is run on millions of times.
     """
-    pairs = read.get_aligned_pairs(matches_only=False)
-    result: list[str] = []
-    covered_ref_positions: set[int] = set()
-
-    for read_pos, ref_pos in pairs:
-        if ref_pos is None or ref_pos < ref_start:
-            continue
-        if ref_pos >= ref_end:
-            break
-        covered_ref_positions.add(ref_pos)
-        result.append("N" if read_pos is None else read.query_sequence[read_pos])
-
-    expected = set(range(ref_start, ref_end))
-    if covered_ref_positions != expected:
+    lo_bound = max(read.reference_start, ref_start)
+    hi_bound = min(read.reference_end, ref_end)
+    if lo_bound >= hi_bound:
+        return None
+    if not allow_partial and (lo_bound != ref_start or hi_bound != ref_end):
         return None
 
-    return "".join(result)
+    seq = read.query_sequence
+    q_pos = 0
+    r_pos = read.reference_start
+    pieces: list[str] = []
+
+    for op, length in read.cigartuples:
+        if op in _ALIGNED:
+            lo, hi = max(r_pos, lo_bound), min(r_pos + length, hi_bound)
+            if lo < hi:
+                pieces.append(seq[q_pos + lo - r_pos:q_pos + hi - r_pos])
+            q_pos += length
+            r_pos += length
+        elif op == _DELETION:
+            lo, hi = max(r_pos, lo_bound), min(r_pos + length, hi_bound)
+            if lo < hi:
+                pieces.append("N" * (hi - lo))
+            r_pos += length
+        elif op == _REF_SKIP:
+            if max(r_pos, lo_bound) < min(r_pos + length, hi_bound):
+                return None
+            r_pos += length
+        elif op in (_INSERTION, _SOFT_CLIP):
+            q_pos += length
+        if r_pos >= hi_bound:
+            break
+
+    body = "".join(pieces)
+    if len(body) != hi_bound - lo_bound:
+        return None
+    return "N" * (lo_bound - ref_start) + body + "N" * (ref_end - hi_bound)
 
 
 def _iter_records(
     bam_path: Path,
     ref_config: ReferenceConfig,
     mapq_min: int,
+    threads: int = 1,
+    allow_partial_orf: bool = True,
 ) -> Iterator[tuple[str, str, str]]:
-    """Yield (barcode, orf_seq, read_id) for each usable read."""
-    with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+    """Yield (barcode, orf_seq, read_id) for each usable read.
+
+    The barcode must be fully spanned with no deletions. With
+    ``allow_partial_orf`` a read that covers only part of the ORF still
+    contributes, with ``N`` for the uncovered bases.
+    """
+    with pysam.AlignmentFile(str(bam_path), "rb", threads=threads) as bam:
         for read in bam.fetch():
             if read.is_secondary or read.is_supplementary or read.is_unmapped:
                 continue
@@ -115,7 +158,7 @@ def _iter_records(
                 continue
 
             orf_seq = _extract_interval(
-                read, ref_config.orf_start, ref_config.orf_end
+                read, ref_config.orf_start, ref_config.orf_end, allow_partial_orf
             )
             if orf_seq is None:
                 continue
@@ -130,6 +173,7 @@ def extract_reads_sorted(
     mapq_min: int = 0,
     sort_buffer: str = "2G",
     threads: int = 4,
+    allow_partial_orf: bool = True,
 ) -> None:
     """Extract (barcode, orf_seq, read_id) from BAM and write sorted by barcode.
 
@@ -140,13 +184,18 @@ def extract_reads_sorted(
     bam_path = Path(bam_path)
     output_path = Path(output_path)
 
-    with tempfile.TemporaryDirectory() as align_dir:
+    # The aligned BAM of a full PacBio cell is tens of GB: keep it beside the output, not in /tmp.
+    with tempfile.TemporaryDirectory(dir=output_path.parent) as align_dir:
         aligned_bam_path = _ensure_aligned_bam(bam_path, ref_config.plasmid_path, Path(align_dir), threads)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".tsv", delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".tsv", delete=False, dir=output_path.parent
+        ) as tmp:
             tmp_path = Path(tmp.name)
             n_written = 0
-            for barcode, orf_seq, read_id in _iter_records(aligned_bam_path, ref_config, mapq_min):
+            for barcode, orf_seq, read_id in _iter_records(
+                aligned_bam_path, ref_config, mapq_min, threads, allow_partial_orf
+            ):
                 tmp.write(f"{barcode}\t{orf_seq}\t{read_id}\n")
                 n_written += 1
 
@@ -157,7 +206,7 @@ def extract_reads_sorted(
         )
 
     result = subprocess.run(
-        f"LC_ALL=C sort -k1,1 --buffer-size={sort_buffer} {tmp_path} | gzip > {output_path}",
+        f"LC_ALL=C sort -k1,1 --buffer-size={sort_buffer} -T {output_path.parent} {tmp_path} | gzip > {output_path}",
         shell=True,
         check=True,
         capture_output=True,

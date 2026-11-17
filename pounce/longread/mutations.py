@@ -14,7 +14,12 @@ def _parse_nuc_mutation(mut_str: str) -> tuple[str, int, str]:
 
 
 def call_nt_mutations(consensus_seq: str, wt_seq: str) -> list[str]:
-    """Return list of nucleotide mutations as 'REF{pos}ALT' strings (1-based)."""
+    """Return list of nucleotide mutations as 'REF{pos}ALT' strings (1-based).
+
+    A consensus ``N`` (every read has a deletion or no call there) is reported
+    as a mutation to ``N`` rather than ignored, so such barcodes are not
+    mistaken for wild type.
+    """
     if len(consensus_seq) != len(wt_seq):
         raise ValueError(
             f"Length mismatch: consensus={len(consensus_seq)}, WT={len(wt_seq)}"
@@ -22,7 +27,7 @@ def call_nt_mutations(consensus_seq: str, wt_seq: str) -> list[str]:
     return [
         f"{wt}{i + 1}{cons}"
         for i, (wt, cons) in enumerate(zip(wt_seq, consensus_seq))
-        if cons != "N" and cons != wt
+        if cons != wt
     ]
 
 
@@ -30,7 +35,9 @@ def nuc_to_aa_mutations(nt_mutations: list[str], wt_orf_seq: str) -> list[str]:
     """Convert nucleotide mutation list to amino acid mutation list.
 
     Synonymous mutations produce no entries. Stop codons are represented as '*'.
-    Multiple mutations in the same codon are resolved together.
+    Multiple mutations in the same codon are resolved together. A codon that
+    contains an ``N`` is reported as ``{wt_aa}{pos}-``. Entries are ordered by
+    residue position.
     """
     if not nt_mutations:
         return []
@@ -48,10 +55,8 @@ def nuc_to_aa_mutations(nt_mutations: list[str], wt_orf_seq: str) -> list[str]:
     for codon_idx in affected_codons:
         wt_codon = "".join(wt_bases[codon_idx * 3:(codon_idx + 1) * 3])
         mut_codon = "".join(mut_bases[codon_idx * 3:(codon_idx + 1) * 3])
-        if "N" in mut_codon:
-            continue
         wt_aa = str(Seq(wt_codon).translate())
-        mut_aa = str(Seq(mut_codon).translate())
+        mut_aa = "-" if "N" in mut_codon else str(Seq(mut_codon).translate())
         if wt_aa != mut_aa:
             aa_muts.append(f"{wt_aa}{codon_idx + 1}{mut_aa}")
 
