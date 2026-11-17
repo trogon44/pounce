@@ -67,3 +67,92 @@ def test_replicate_enrichments(data_dir):
     assert len(result) > 0
     # All values finite
     assert result.apply(lambda col: col.apply(math.isfinite)).all().all()
+
+
+def _plate(rows):
+    return pd.DataFrame(rows, columns=["sample_id", "timepoint", "replicate", "condition"])
+
+
+def test_multiple_selective_samples_per_replicate_raises():
+    """Silently taking the first S row once paired a replicate with the wrong sample."""
+    counts = pd.DataFrame({"S1": [5, 5], "S2": [9, 9], "NS": [10, 10]}, index=["a", "b"])
+    plate = _plate([("S1", "T2", "A", "S"), ("S2", "T2", "A", "S"), ("NS", "T2", "A", "NS")])
+    with pytest.raises(ValueError, match="selective samples"):
+        compute_replicate_enrichments(counts, plate, timepoint="T2", ns_min=0)
+
+
+def test_multiple_ns_samples_per_replicate_raises():
+    counts = pd.DataFrame({"S": [5, 5], "NS1": [10, 10], "NS2": [9, 9]}, index=["a", "b"])
+    plate = _plate([("S", "T2", "A", "S"), ("NS1", "T2", "A", "NS"), ("NS2", "T2", "A", "NS")])
+    with pytest.raises(ValueError, match="non-selective samples"):
+        compute_replicate_enrichments(counts, plate, timepoint="T2", ns_min=0)
+
+
+def test_replicates_are_filtered_independently_on_their_own_ns_column():
+    counts = pd.DataFrame(
+        {"SA": [20, 20], "NSA": [30, 2], "SB": [20, 20], "NSB": [2, 30]}, index=["x", "y"]
+    )
+    plate = _plate([
+        ("SA", "T2", "A", "S"), ("NSA", "T2", "A", "NS"),
+        ("SB", "T2", "B", "S"), ("NSB", "T2", "B", "NS"),
+    ])
+    out = compute_replicate_enrichments(counts, plate, timepoint="T2", ns_min=10)
+    assert out["enrich_A"].notna().to_dict() == {"x": True, "y": False}
+    assert out["enrich_B"].notna().to_dict() == {"x": False, "y": True}
+
+
+STACKED_PLATE = pd.DataFrame(
+    [
+        ("SP01", "T0", "A", "NS", "00h"), ("SP03", "T0", "A", "NS", "24h"),
+        ("SP11", "T0", "A", "S", "72h"), ("SP12", "T0", "A", "NS", "72h"),
+        ("SP02", "T0", "B", "NS", "00h"),
+        ("SP13", "T0", "B", "S", "72h"), ("SP14", "T0", "B", "NS", "72h"),
+        ("SP07", "T2", "A", "S", "48h"), ("SP08", "T2", "A", "NS", "48h"),
+    ],
+    columns=["sample_id", "timepoint", "replicate", "condition", "harvest"],
+)
+
+
+def _stacked_counts():
+    rng = np.random.default_rng(0)
+    cols = STACKED_PLATE["sample_id"].tolist()
+    return pd.DataFrame(rng.integers(20, 200, size=(30, len(cols))), columns=cols,
+                        index=[f"b{i}" for i in range(30)])
+
+
+def test_s_is_paired_with_ns_of_the_same_harvest():
+    counts = _stacked_counts()
+    out = compute_replicate_enrichments(counts, STACKED_PLATE, "T0", ns_min=0)
+    assert list(out.columns) == ["enrich_A", "enrich_B"]
+    expected_a = compute_enrichment(counts, "SP11", "SP12", ns_min=0)   # 72h with 72h
+    wrong_a = compute_enrichment(counts, "SP11", "SP01", ns_min=0)      # 72h with 00h
+    pd.testing.assert_series_equal(out["enrich_A"], expected_a, check_names=False)
+    assert not np.allclose(out["enrich_A"], wrong_a)
+
+
+def test_early_ns_only_harvests_are_ignored():
+    out = compute_replicate_enrichments(_stacked_counts(), STACKED_PLATE, "T0", ns_min=0)
+    assert out.shape[1] == 2  # 00h/24h NS-only groups produce no column
+
+
+def test_several_paired_harvests_require_a_choice():
+    plate = pd.concat([STACKED_PLATE, pd.DataFrame(
+        [("SP20", "T0", "A", "S", "48h"), ("SP21", "T0", "A", "NS", "48h")],
+        columns=STACKED_PLATE.columns)], ignore_index=True)
+    counts = pd.DataFrame(1, index=["a", "b"], columns=plate["sample_id"])
+    with pytest.raises(ValueError, match="several harvests"):
+        compute_replicate_enrichments(counts, plate, "T0", ns_min=0)
+    out = compute_replicate_enrichments(counts + 5, plate, "T0", harvest="48h", ns_min=0)
+    assert list(out.columns) == ["enrich_A"]
+
+
+def test_no_complete_pair_raises():
+    with pytest.raises(ValueError, match="No complete S/NS pair"):
+        compute_replicate_enrichments(_stacked_counts(), STACKED_PLATE, "T0", harvest="00h", ns_min=0)
+
+
+def test_harvest_without_column_raises():
+    counts = pd.DataFrame(1, index=["a"], columns=["S", "NS"])
+    plate = _plate([("S", "T2", "A", "S"), ("NS", "T2", "A", "NS")])
+    with pytest.raises(ValueError, match="no 'harvest' column"):
+        compute_replicate_enrichments(counts, plate, "T2", harvest="24h", ns_min=0)
